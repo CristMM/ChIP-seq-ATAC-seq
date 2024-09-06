@@ -1,0 +1,122 @@
+Task 1. Create several folders inside ATAC-seq.
+    
+    Navigate to the ATAC-seq folder and create the analyses folder to store bigBed and peaks files.
+
+      mkdir data/bigBed.files
+      mkdir analyses
+
+
+Task 2. Obtain metadata for sigmoid_colon and stomach.  
+  Download the required ATAC-seq metadata in order to generate the files.
+
+    ../bin/download.metadata.sh "https://www.encodeproject.org/metadata/?replicates.library.biosample.donor.uuid=d370683e-81e7-473f-8475-7716d027849b&status=released&status=submitted&status=in+progress&assay_title=ATAC-seq&biosample_ontology.term_name=stomach&biosample_ontology.term_name=sigmoid+colon&type=Experiment"
+
+  Create bigBed.peaks.ids.txt using metadata.tsv and generate the bigBed files.
+
+        grep -F "bigBed_narrowPeak" metadata.tsv|\
+        grep -F "pseudoreplicated_peaks" |\
+        grep -F "GRCh38" |\
+        awk 'BEGIN{FS=OFS="\t"}{print $1, $11, $23}' |\
+        sort -k2,2 -k1,1r |\
+        sort -k2,2 -u > analyses/bigBed.peaks.ids.txt
+
+        cut -f1 analyses/bigBed.peaks.ids.txt |\
+        while read filename; do
+          wget -P data/bigBed.files "https://www.encodeproject.org/files/$filename/@@download/$filename.bigBed"
+        done
+
+  Create the md5sum file using the two bigBed files that were generated earlier.
+
+      for file_type in bigBed; do
+        # retrieve original MD5 hash from the metadata
+        ../bin/selectRows.sh <(cut -f1 analyses/"$file_type".*.ids.txt) metadata.tsv | cut -f1,46 > data/"$file_type".files/md5sum.txt
+        # compute MD5 hash on the downloaded files 
+        cat data/"$file_type".files/md5sum.txt |\
+        while read filename original_md5sum; do 
+          md5sum data/"$file_type".files/"$filename"."$file_type" |\
+          awk -v filename="$filename" -v original_md5sum="$original_md5sum" 'BEGIN{FS=" "; OFS="\t"}{print filename, original_md5sum, $1}' 
+        done > tmp 
+        mv tmp data/"$file_type".files/md5sum.txt
+        # make sure there are no files for which original and computed MD5 hashes differ
+        awk '$2!=$3' data/"$file_type".files/md5sum.txt
+      done
+
+      Data obtained from the md5sum file:
+        ENCFF287UHP	46f2ae76779da5be7de09b63d5c2ceb9	46f2ae76779da5be7de09b63d5c2ceb9
+        ENCFF762IFP	f6a97407b6ba4697108e74451fb3eaf4	f6a97407b6ba4697108e74451fb3eaf4
+
+
+Task 3. Use BEDTools to obtain data for the tissues.
+  
+  Convert the bigBed file to BED format.
+
+        mkdir data/bed.files
+
+        cut -f1 analyses/bigBed.peaks.ids.txt |\
+        while read filename; do
+          bigBedToBed data/bigBed.files/"$filename".bigBed data/bed.files/"$filename".bed
+        done
+
+  Download the list of promoters file and move it to annotation.
+
+        mkdir annotation 
+
+        sudo mv /mnt/c/Users/cris/Downloads/gencode.v24.protein.coding.non.redundant.TSS.bed /home/cristimm/epigenomics_uvic/ATAC-seq/annotation
+
+  Create the peaks.analysis folder and obtain the number of peaks that intersect promoter regions.
+
+        mkdir peaks.analysis
+
+        cut -f-2 analyses/bigBed.peaks.ids.txt |\
+        while read filename tissue; do 
+          bedtools intersect -a annotation/gencode.v24.protein.coding.non.redundant.TSS.bed -b data/bed.files/"$filename".bed -u |\
+          cut -f7 |\
+          sort -u > analyses/peaks.analysis/genes.with.peaks."$tissue".txt
+        done
+
+  Download and convert the gencode.v24 file to BED format.
+
+        wget -P annotation "https://www.encodeproject.org/files/gencode.v24.primary_assembly.annotation/@@download/gencode.v24.primary_assembly.annotation.gtf.gz"
+
+  Decompress.
+
+        gunzip annotation/gencode.v24.primary_assembly.annotation.gtf.gz
+
+  Convert the GTF file to BED format.
+
+        awk '$3=="gene"' annotation/gencode.v24.primary_assembly.annotation.gtf |\
+        grep -F "protein_coding" |\
+        cut -d ";" -f1 |\
+        awk 'BEGIN{OFS="\t"}{print $1, $4, $5, $10, 0, $7, $10}' |\
+        sed 's/\"//g' |\
+        awk 'BEGIN{FS=OFS="\t"}$1!="chrM"{$2=($2-1); print $0}' > annotation/gencode.v24.protein.coding.gene.body.bed
+
+  Count the number of peaks that intersect with promoter regions and those outside gene regions.
+
+        for tissue in sigmoid_colon stomach; do
+          echo "$tissue promoter intersections:"
+          wc -l analyses/peaks.analysis/genes.with.peaks."$tissue".txt
+        done
+        
+          Answer:
+            sigmoid_colon promoter intersections: 14830
+            stomach promoter intersections:       15029
+
+
+  Obtain the peaks that fall outside genomic regions.
+
+      cut -f1 analyses/bigBed.peaks.ids.txt |\
+         while read filename tissue; do
+           bedtools intersect -v -a data/bed.files/"$ENCFF287UHP".bed -b annotation/gencode.v24.protein.coding.gene.body.bed > analyses/peaks.analysis/peaks.outside.genes."$tissue".bed
+      done
+      
+  Count the peaks outside the genes.
+
+      for tissue in sigmoid_colon stomach; do
+        echo "$tissue peaks outside gene bodies:"
+        wc -l analyses/peaks.analysis/peaks.outside.genes."$tissue".bed
+      done
+      
+      Answer: 
+         sigmoid_colon peaks outside gene bodies: 37035
+         stomach peaks outside gene bodies:       34537
